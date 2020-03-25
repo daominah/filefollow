@@ -1,0 +1,19 @@
+# coding app's project files
+.idea
+.vscode
+
+
+# Go testing output
+*.out
+*.test
+profile*.pdf
+
+
+# binary exes
+cmd/testcmd/testcmd.go
+cmd/*/bin_*
+cmd/*/*.exe
+
+
+# config with real username, password...
+conf/ignore*.sh

@@ -1,0 +1,3 @@
+// testcmd 's purpose is to try to call functions in pkg/...
+
+package main
