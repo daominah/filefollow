@@ -95,7 +95,13 @@ func (flr *Follower) follow() {
 
 		// wait for the file modification
 		changedType := Unchanged
-		for err == nil && changedType == Unchanged {
+		shouldStop := false
+		for err == nil && changedType == Unchanged && !shouldStop {
+			select {
+			case <-flr.StopDoneChan:
+				shouldStop = true
+			default:
+			}
 			changedType, err = flr.checkFileChanged()
 			time.Sleep(flr.pollInterval)
 		}
