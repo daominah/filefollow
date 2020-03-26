@@ -11,7 +11,8 @@ import (
 	"github.com/daominah/gomicrokit/log"
 )
 
-// Follower _
+// Follower works like "tail -f" command,
+// Caller receives bytes from OutputChan and StopDoneChan
 type Follower struct {
 	// file need to follow
 	filePath string
@@ -54,9 +55,7 @@ func NewFollower(filePath string, isWriterTruncate bool) *Follower {
 // wait for file modification
 func (flr *Follower) follow() {
 	for i := 0; i > -1; i++ { // this loop break if Follower stop
-		if true || i%1000 == 0 {
-			log.Debugf("loop %v of Follower_follow", i)
-		}
+		//log.Debugf("loop %v of Follower_follow", i)
 		select {
 		case <-flr.StopDoneChan:
 			break
@@ -66,7 +65,7 @@ func (flr *Follower) follow() {
 		// reopen the file if needed
 		if flr.fd == nil {
 			fd, err := os.Open(flr.filePath)
-			log.Debugf("loop %v os_Open err: %v", i, err)
+			//log.Debugf("loop %v os_Open err: %v", i, err)
 			if err != nil {
 				if i == 0 {
 					log.Infof("error when first time os_Open: %v", err)
