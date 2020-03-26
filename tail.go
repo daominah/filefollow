@@ -15,8 +15,8 @@ import (
 type Follower struct {
 	// file need to follow
 	filePath string
-	// sleeping duration in loop check file stat
-	pollInterval time.Duration
+	// PollInterval is sleeping duration in the Follower's loops
+	PollInterval time.Duration
 	// if isWriterTruncate is true, func follow reopen file on modified,
 	// default assume writer append the file
 	isWriterTruncate bool
@@ -39,7 +39,7 @@ func NewFollower(filePath string, isWriterTruncate bool) *Follower {
 	ctx, cxl := context.WithCancel(context.Background())
 	ret := &Follower{
 		filePath:         filePath,
-		pollInterval:     100 * time.Millisecond,
+		PollInterval:     100 * time.Millisecond,
 		isWriterTruncate: isWriterTruncate,
 
 		OutputChan:   make(chan []byte),
@@ -71,7 +71,7 @@ func (flr *Follower) follow() {
 				if i == 0 {
 					log.Infof("error when first time os_Open: %v", err)
 				}
-				time.Sleep(flr.pollInterval)
+				time.Sleep(flr.PollInterval)
 				continue
 			}
 			flr.fd = fd
@@ -103,7 +103,7 @@ func (flr *Follower) follow() {
 			default:
 			}
 			changedType, err = flr.checkFileChanged()
-			time.Sleep(flr.pollInterval)
+			time.Sleep(flr.PollInterval)
 		}
 		if err != nil {
 			log.Infof("error when checkFileChanged: %v", err)
