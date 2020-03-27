@@ -134,6 +134,7 @@ func (flr *Follower) follow() {
 			default:
 			}
 			changedType, err = flr.checkFileChanged()
+			log.Debugf("changedType: %v, err: %v", changedType, err)
 			if err != nil || changedType != Unchanged {
 				break LoopCheckFileChanged
 			}
