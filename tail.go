@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"time"
 
+	"io"
+
 	"github.com/daominah/gomicrokit/gofast"
 	"github.com/daominah/gomicrokit/log"
 )
@@ -18,34 +20,36 @@ type Follower struct {
 	filePath string
 	// PollInterval is sleeping duration in the Follower's loops
 	PollInterval time.Duration
-	// if isWriterTruncate is true, func follow reopen file on modified,
-	// default assume writer append the file
+	// if isWriterTruncate is true, func follow read from beginning of the file
+	// on modified, default assume writer append the file
 	isWriterTruncate bool
-	// if skipCheckChange is true, read file periodically,
-	// skip check file changes with os_Stat
-	skipCheckChange bool
+	// if isNotCheckModified is true, periodically read file without check if
+	// the file modified with os_Stat (because check file changes can be slow on
+	// a network drive)
+	isNotCheckModified bool
 
 	// file descriptor
-	fd           *os.File
+	fd *os.File
+	// to check if the file modified
 	lastFileInfo os.FileInfo
-	// save where to continue to read if the file got appended
-	lastOffset int
+	// OutputChan returns changes from the file
 	OutputChan chan []byte
 	// call this func tell Follower to stop loops, release resources
 	stopCxl context.CancelFunc
-	// receive StopDoneChan to know when the Follower stop
+	// StopDoneChan returns when the Follower stop
 	StopDoneChan <-chan struct{}
 }
 
 // NewFollower init a Follower,
-// read Follower fields comment for input meaning
-func NewFollower(filePath string, isWriterTruncate bool, skipCheckChange bool) *Follower {
+// read Follower fields comment for input args meaning
+func NewFollower(filePath string, isWriterTruncate bool,
+	isNotCheckModified bool) *Follower {
 	ctx, cxl := context.WithCancel(context.Background())
 	ret := &Follower{
-		filePath:         filePath,
-		PollInterval:     100 * time.Millisecond,
-		isWriterTruncate: isWriterTruncate,
-		skipCheckChange:  skipCheckChange,
+		filePath:           filePath,
+		PollInterval:       100 * time.Millisecond,
+		isWriterTruncate:   isWriterTruncate,
+		isNotCheckModified: isNotCheckModified,
 
 		OutputChan:   make(chan []byte),
 		StopDoneChan: ctx.Done(),
@@ -58,11 +62,12 @@ func NewFollower(filePath string, isWriterTruncate bool, skipCheckChange bool) *
 // follow reads until EOF, send data to the OutputChan and
 // wait for file modification
 func (flr *Follower) follow() {
-	for i := 0; i > -1; i++ { // this loop break if Follower stop
+LoopFollow:
+	for i := 0; i > -1; i++ {
 		//log.Debugf("loop %v of Follower_follow", i)
 		select {
 		case <-flr.StopDoneChan:
-			break
+			break LoopFollow
 		default:
 		}
 
@@ -102,14 +107,14 @@ func (flr *Follower) follow() {
 			continue
 		}
 
-		if flr.skipCheckChange {
+		if flr.isNotCheckModified {
 			if !flr.isWriterTruncate { // next loop read file from current offset
 				time.Sleep(flr.PollInterval)
 				continue
 			}
 			bt := time.Now()
 			log.Debugf("before fd_Seek %v", flr.filePath)
-			_, err := flr.fd.Seek(0, os.SEEK_SET)
+			_, err := flr.fd.Seek(0, io.SeekStart)
 			log.Debugf("after fd_Seek %v, dur: %v", flr.filePath, time.Now().Sub(bt))
 			if err != nil {
 				log.Infof("error when Seek %v: %v", flr.filePath, err)
@@ -141,7 +146,7 @@ func (flr *Follower) follow() {
 			time.Sleep(flr.PollInterval)
 		}
 		if isFlrStopped {
-			break
+			break LoopFollow
 		}
 		if err != nil {
 			log.Infof("error when checkFileChanged: %v", err)
