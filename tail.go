@@ -94,7 +94,8 @@ LoopFollow:
 		log.Debugf("loop %v before buf_ReadFrom %v", i, flr.filePath)
 		n, err := buf.ReadFrom(flr.fd)
 		log.Debugf("loop %v after buf_ReadFrom %v, dur: %v", i, flr.filePath, time.Now().Sub(bt))
-		if n > 0 {
+		if (i == 0 && n >= 0) || // the first time open file can returns empty data
+			n > 0 {
 			select {
 			case flr.OutputChan <- buf.Bytes():
 			case <-flr.StopDoneChan:
