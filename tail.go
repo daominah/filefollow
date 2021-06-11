@@ -3,220 +3,200 @@ package filefollow
 import (
 	"bytes"
 	"context"
+	"io"
+	"log"
 	"os"
+	"reflect"
 	"runtime"
 	"time"
-
-	"io"
-
-	"github.com/daominah/gomicrokit/gofast"
-	"github.com/daominah/gomicrokit/log"
 )
 
-// Follower works like "tail -f" command,
-// Caller receives bytes from OutputChan and StopDoneChan
+// Follower works like "tail --follow=name" linux command,
+// caller receives newly appended data as bytes from OutputChan
 type Follower struct {
-	// file need to follow
-	filePath string
-	// PollInterval is sleeping duration in the Follower's loops
-	PollInterval time.Duration
-	// if isWriterTruncate is true, func follow read from beginning of the file
-	// on modified, default assume writer append the file
-	isWriterTruncate bool
-	// if isNotCheckModified is true, periodically read file without check if
-	// the file modified with os_Stat (because check file changes can be slow on
-	// a network drive)
-	isNotCheckModified bool
+	FilePath   string      // file to follow
+	OutputChan chan []byte // returns newly appended data
 
-	// file descriptor
-	fd *os.File
-	// to check if the file modified
+	PollInterval time.Duration // duration between checks the file is modified
+	Log          Logger        // for debugging
+
+	// read from beginning of the file on modified or current offset
+	IsReadFromBeginningOnModified bool
+	// read the file again without check whether it is modified with os_Stat,
+	// sometimes check modified is very slow on a network drive
+	IsSkipCheckModified bool
+
+	fd           *os.File
 	lastFileInfo os.FileInfo
-	// OutputChan returns changes from the file
-	OutputChan chan []byte
-	// call this func tell Follower to stop loops, release resources
-	stopCxl context.CancelFunc
-	// StopDoneChan returns when the Follower stop
-	StopDoneChan <-chan struct{}
+	Stop         context.CancelFunc // call this func to stop following the file
+	StopDoneChan <-chan struct{}    // corresponding channel of the Stop func
 }
 
-// NewFollower init a Follower,
-// read Follower fields comment for input args meaning
-func NewFollower(filePath string, isWriterTruncate bool,
-	isNotCheckModified bool) *Follower {
-	ctx, cxl := context.WithCancel(context.Background())
+// NewFollower start following a file with default config
+func NewFollower(filePath string) *Follower {
+	ctxStop, cclStop := context.WithCancel(context.Background())
 	ret := &Follower{
-		filePath:           filePath,
-		PollInterval:       100 * time.Millisecond,
-		isWriterTruncate:   isWriterTruncate,
-		isNotCheckModified: isNotCheckModified,
+		FilePath:   filePath,
+		OutputChan: make(chan []byte),
 
-		OutputChan:   make(chan []byte),
-		StopDoneChan: ctx.Done(),
-		stopCxl:      cxl,
+		PollInterval: 100 * time.Millisecond,
+		Log:          LoggerNil{},
+
+		IsReadFromBeginningOnModified: false,
+		IsSkipCheckModified:           false,
+
+		fd:           nil, // will be defined in Follow loop
+		lastFileInfo: nil,
+		Stop:         cclStop,
+		StopDoneChan: ctxStop.Done(),
 	}
-	go ret.follow()
+	go ret.Follow()
 	return ret
 }
 
-// follow reads until EOF, send data to the OutputChan and
-// wait for file modification
-func (flr *Follower) follow() {
-LoopFollow:
-	for i := 0; i > -1; i++ {
-		//log.Debugf("loop %v of Follower_follow", i)
-		select {
-		case <-flr.StopDoneChan:
-			break LoopFollow
-		default:
+func (f *Follower) checkShouldStop() bool {
+	select {
+	case <-f.StopDoneChan:
+		return true
+	default:
+		return false
+	}
+}
+
+// Follow loops following the file until Stop is called,
+// each iteration reads to EOF, send data to OutputChan and wait for a file modification
+func (f *Follower) Follow() {
+	for i := 0; true; i++ {
+		if i > 0 {
+			time.Sleep(f.PollInterval)
+		}
+		if f.checkShouldStop() {
+			break
 		}
 
-		// reopen the file if needed
-		if flr.fd == nil {
-			bt := time.Now()
-			log.Debugf("loop %v before os_Open %v", i, flr.filePath)
-			fd, err := os.Open(flr.filePath)
-			log.Debugf("loop %v after os_Open %v dur: %v", i, flr.filePath, time.Now().Sub(bt))
+		if f.fd == nil { // open the file or reopen if needed
+			beginT := time.Now()
+			fd, err := os.Open(f.FilePath)
+			f.Log.Printf("i %v os_Open %v dur: %v", i, f.FilePath, time.Since(beginT))
 			if err != nil {
-				if i == 0 {
-					log.Infof("error when first time os_Open: %v", err)
-				}
-				time.Sleep(flr.PollInterval)
-				continue
+				f.Log.Printf("error os_Open: %v", err)
 			}
-			flr.fd = fd
-			flr.lastFileInfo, _ = fd.Stat()
+			f.fd = fd
+			f.lastFileInfo, _ = fd.Stat()
 		}
 
-		// read until EOF
+		// reads to EOF
+
 		buf := bytes.NewBuffer(nil)
-		bt := time.Now()
-		log.Debugf("loop %v before buf_ReadFrom %v", i, flr.filePath)
-		n, err := buf.ReadFrom(flr.fd)
-		log.Debugf("loop %v after buf_ReadFrom %v, dur: %v", i, flr.filePath, time.Now().Sub(bt))
-		if (i == 0 && n >= 0) || // the first time open file can returns empty data
-			n > 0 {
+		beginT := time.Now()
+		n, err := buf.ReadFrom(f.fd)
+		f.Log.Printf("i %v buf_ReadFrom: nBytes: %v, dur: %v", i, n, time.Since(beginT))
+		if i == 0 || n > 0 {
+			// the first time open the file always send data to OutputChan, even if the file is empty
 			select {
-			case flr.OutputChan <- buf.Bytes():
-			case <-flr.StopDoneChan:
+			case f.OutputChan <- buf.Bytes():
+			case <-f.StopDoneChan:
 			}
 		}
 		if err != nil {
-			log.Infof("error when bytes_Buffer_ReadFrom: %v", err)
-			flr.fd.Close()
-			flr.fd = nil
+			f.Log.Printf("error buf_ReadFrom: %v", err)
+			f.fd.Close()
+			f.fd = nil
 			continue
 		}
 
-		if flr.isNotCheckModified {
-			if !flr.isWriterTruncate { // next loop read file from current offset
-				time.Sleep(flr.PollInterval)
+		if f.IsSkipCheckModified {
+			if !f.IsReadFromBeginningOnModified {
 				continue
 			}
-			bt := time.Now()
-			log.Debugf("before fd_Seek %v", flr.filePath)
-			_, err := flr.fd.Seek(0, io.SeekStart)
-			log.Debugf("after fd_Seek %v, dur: %v", flr.filePath, time.Now().Sub(bt))
-			if err != nil {
-				log.Infof("error when Seek %v: %v", flr.filePath, err)
-				flr.fd.Close()
-				flr.fd = nil
-				continue
-			} else {
-				time.Sleep(flr.PollInterval)
+			beginT := time.Now()
+			f.Log.Printf("i %v fd_Seek %v, dur: %v", i, f.FilePath, time.Since(beginT))
+			_, err := f.fd.Seek(0, io.SeekStart)
+			if err == nil {
 				continue
 			}
-		}
-
-		// wait for the file modification
-		isFlrStopped := false
-		changedType := Unchanged
-	LoopCheckFileChanged:
-		for {
-			select {
-			case <-flr.StopDoneChan:
-				isFlrStopped = true
-				break LoopCheckFileChanged
-			default:
-			}
-			changedType, err = flr.checkFileChanged()
-			log.Debugf("changedType: %v, err: %v", changedType, err)
-			if err != nil || changedType != Unchanged {
-				break LoopCheckFileChanged
-			}
-			time.Sleep(flr.PollInterval)
-		}
-		if isFlrStopped {
-			break LoopFollow
-		}
-		if err != nil {
-			log.Infof("error when checkFileChanged: %v", err)
-			flr.fd.Close()
-			flr.fd = nil
+			f.Log.Printf("error fd_Seek %v", err)
+			f.fd.Close()
+			f.fd = nil
 			continue
 		}
-		switch changedType {
+
+		// wait for a file modification
+
+		modifiedType := Unchanged
+		var errCFM error
+		for k := 0; true; k++ {
+			if f.checkShouldStop() {
+				break
+			}
+			modifiedType, errCFM = f.checkFileModified()
+			f.Log.Printf("i %v k %v modifiedType: %v, errCFM: %v", i, k, modifiedType, errCFM)
+			if errCFM != nil || modifiedType != Unchanged {
+				break
+			}
+			time.Sleep(f.PollInterval)
+		}
+		if f.checkShouldStop() {
+			break
+		}
+		if errCFM != nil {
+			f.fd.Close()
+			f.fd = nil
+			continue
+		}
+		switch modifiedType {
 		case Appended:
 			continue
-		case Truncated:
-			if !flr.isWriterTruncate { // handling same as append
+		case Edited:
+			if !f.IsReadFromBeginningOnModified { // same handle as append
 				continue
 			}
-			bt := time.Now()
-			log.Debugf("before fd_Seek %v", flr.filePath)
-			_, err := flr.fd.Seek(0, os.SEEK_SET)
-			log.Debugf("after fd_Seek %v, dur: %v", flr.filePath, time.Now().Sub(bt))
+			beginT := time.Now()
+			_, err := f.fd.Seek(0, io.SeekStart)
+			f.Log.Printf("fd_Seek %v, dur: %v", f.FilePath, time.Since(beginT))
 			if err != nil {
-				log.Infof("error when Seek %v: %v", flr.filePath, err)
-				flr.fd.Close()
-				flr.fd = nil
+				f.Log.Printf("error fd_Seek %v: %v", f.FilePath, err)
+				f.fd.Close()
+				f.fd = nil
 				continue
 			} else {
 				continue // next loop read current from begin
 			}
 		case Created:
-			flr.fd.Close()
-			flr.fd = nil
+			f.fd.Close()
+			f.fd = nil
 			continue
 		}
 	}
 }
 
-// Stop stops loops, release resources
-func (flr Follower) Stop() {
-	log.Infof("the Follower %v about to stop", flr.filePath)
-	flr.stopCxl()
-}
+type ModifiedType string
 
-// ChangedType is type of file modification
-type ChangedType string
-
-// ChangedType enum
+// ModifiedType enum
 const (
-	Unchanged ChangedType = ""
-	Created   ChangedType = "created"
-	Truncated ChangedType = "truncated"
-	Appended  ChangedType = "appended"
+	Unchanged ModifiedType = "UNCHANGED"
+	Created   ModifiedType = "CREATED"
+	Appended  ModifiedType = "APPENDED"
+	Edited    ModifiedType = "EDITED"
 )
 
-// checkFileChanged modifies flr_lastFileInfo
-func (flr *Follower) checkFileChanged() (ChangedType, error) {
-	bt := time.Now()
-	log.Debugf("before checkFileChanged %v ", flr.filePath)
+// checkFileModified modifies flr_lastFileInfo
+func (f *Follower) checkFileModified() (ModifiedType, error) {
+	beginT := time.Now()
 	defer func() {
-		log.Debugf("after checkFileChanged %v, dur: %v", flr.filePath, time.Now().Sub(bt))
+		f.Log.Printf("checkFileModified dur: %v", time.Since(beginT))
 	}()
-	fi, err := os.Stat(flr.filePath)
+	fi, err := os.Stat(f.FilePath)
 	if err != nil {
 		if os.IsNotExist(err) || (runtime.GOOS == "windows" && os.IsPermission(err)) {
 			return Created, nil
 		}
 		return Created, err
 	}
-	lastFI := flr.lastFileInfo
-	flr.lastFileInfo = fi
+	lastFI := f.lastFileInfo
+	f.lastFileInfo = fi
 
-	if gofast.CheckNilInterface(lastFI) {
+	if checkNilInterface(lastFI) {
 		return Created, nil
 	}
 
@@ -228,11 +208,44 @@ func (flr *Follower) checkFileChanged() (ChangedType, error) {
 	// file got modified
 	if lastFI.ModTime() != fi.ModTime() {
 		if lastFI.Size() >= fi.Size() {
-			return Truncated, nil
+			return Edited, nil
 		}
 		return Appended, nil
 	}
 
 	// file has no changes
 	return Unchanged, nil
+}
+
+type Logger interface {
+	Printf(format string, args ...interface{})
+}
+
+func LoggerStd() Logger {
+	return log.New(os.Stdout, "", log.Lshortfile|log.Lmicroseconds)
+}
+
+type LoggerNil struct{}
+
+func (l LoggerNil) Printf(format string, args ...interface{}) {}
+
+// checkNilInterface returns true even if arg x is a typed nil,
+// we need this func because an interface variable is nil only if both the type
+// and value are nil, so `x == nil` returns false if x is a typed nil
+func checkNilInterface(x interface{}) (result bool) {
+	defer func() {
+		r := recover()
+		if r != nil {
+			result = false
+		}
+	}()
+	if x == nil {
+		// only untyped nil return here
+		return true
+	}
+	if reflect.ValueOf(x).IsNil() {
+		// panic if x is not chan, func, interface, map, pointer, or slice
+		return true
+	}
+	return false
 }
