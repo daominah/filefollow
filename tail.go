@@ -20,7 +20,7 @@ type Follower struct {
 	PollInterval time.Duration // duration between checks the file is modified
 	Log          Logger        // for debugging
 
-	// read from beginning of the file on modified or current offset
+	// read from beginning of the file on modified or read from current offset
 	IsReadFromBeginningOnModified bool
 	// read the file again without check whether it is modified with os_Stat,
 	// sometimes check modified is very slow on a network drive
@@ -92,7 +92,9 @@ func (f *Follower) Follow() {
 		n, err := buf.ReadFrom(f.fd)
 		f.Log.Printf("i %v buf_ReadFrom: nBytes: %v, dur: %v", i, n, time.Since(beginT))
 		if i == 0 || n > 0 {
-			// the first time open the file always send data to OutputChan, even if the file is empty
+			// the first time open the file always send data to OutputChan,
+			// even if the file is empty; from the second time only send data to
+			// OutputChan if n > 0
 			select {
 			case f.OutputChan <- buf.Bytes():
 			case <-f.StopDoneChan:
@@ -104,6 +106,8 @@ func (f *Follower) Follow() {
 			f.fd = nil
 			continue
 		}
+
+		// special case: periodically read the file regardless of modification
 
 		if f.IsSkipCheckModified {
 			if !f.IsReadFromBeginningOnModified {
@@ -121,7 +125,7 @@ func (f *Follower) Follow() {
 			continue
 		}
 
-		// wait for a file modification
+		// common case: wait for a file modification then read again
 
 		modifiedType := Unchanged
 		var errCFM error
@@ -145,10 +149,8 @@ func (f *Follower) Follow() {
 			continue
 		}
 		switch modifiedType {
-		case Appended:
-			continue
-		case Edited:
-			if !f.IsReadFromBeginningOnModified { // same handle as append
+		case Appended, Edited:
+			if !f.IsReadFromBeginningOnModified {
 				continue
 			}
 			beginT := time.Now()

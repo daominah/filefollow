@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"log"
 	"time"
 
@@ -11,34 +10,18 @@ import (
 func main() {
 	filePath := `/home/tungdt/Desktop/a.txt`
 
-	// manually config Follower, can use NewFollower instead
-
-	ctxStop, cclStop := context.WithCancel(context.Background())
-	f := &filefollow.Follower{
-		FilePath:   filePath,
-		OutputChan: make(chan []byte),
-
-		PollInterval:                  100 * time.Millisecond,
-		Log:                           filefollow.LoggerStd(),
-		IsReadFromBeginningOnModified: false,
-		IsSkipCheckModified:           false,
-
-		Stop:         cclStop,
-		StopDoneChan: ctxStop.Done(),
-	}
-	go f.Follow()
-
+	f := filefollow.NewFollower(filePath)
 	go func() {
 		time.Sleep(5 * time.Second)
 		f.Stop()
 	}()
 
-	log.SetFlags(log.Lshortfile | log.Lmicroseconds)
 TheForLoop:
 	for {
 		select {
 		case bs := <-f.OutputChan:
-			log.Printf("newly appended data: %s", bs)
+			log.Printf("at %v newly appended data: %s",
+				time.Now().Format(time.RFC3339Nano), bs)
 		case <-f.StopDoneChan:
 			break TheForLoop
 		}
