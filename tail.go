@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"time"
@@ -15,6 +16,7 @@ import (
 // caller receives newly appended data as bytes from OutputChan
 type Follower struct {
 	FilePath   string      // file to follow
+	FileName   string      // just for logging
 	OutputChan chan []byte // returns newly appended data
 
 	PollInterval time.Duration // duration between checks the file is modified
@@ -33,10 +35,11 @@ type Follower struct {
 }
 
 // NewFollower start following a file with default config
-func NewFollower(filePath string) *Follower {
+func NewFollower(filePath0 string) *Follower {
 	ctxStop, cclStop := context.WithCancel(context.Background())
 	ret := &Follower{
-		FilePath:   filePath,
+		FilePath:   filePath0,
+		FileName:   filepath.Base(filePath0),
 		OutputChan: make(chan []byte),
 
 		PollInterval: 100 * time.Millisecond,
@@ -66,6 +69,9 @@ func (f *Follower) checkShouldStop() bool {
 // Follow loops following the file until Stop is called,
 // each iteration reads to EOF, send data to OutputChan and wait for a file modification
 func (f *Follower) Follow() {
+	if f.FileName == "" {
+		f.FileName = filepath.Base(f.FilePath)
+	}
 	for i := 0; true; i++ {
 		if i > 0 {
 			time.Sleep(f.PollInterval)
@@ -77,7 +83,7 @@ func (f *Follower) Follow() {
 		if f.fd == nil { // open the file or reopen if needed
 			beginT := time.Now()
 			fd, err := os.Open(f.FilePath)
-			f.Log.Printf("i %v os_Open %v dur: %v", i, f.FilePath, time.Since(beginT))
+			f.Log.Printf("i %v os_Open %v dur: %v", i, f.FileName, time.Since(beginT))
 			if err != nil {
 				f.Log.Printf("error os_Open: %v", err)
 			}
@@ -90,7 +96,7 @@ func (f *Follower) Follow() {
 		buf := bytes.NewBuffer(nil)
 		beginT := time.Now()
 		n, err := buf.ReadFrom(f.fd)
-		f.Log.Printf("i %v buf_ReadFrom: nBytes: %v, dur: %v", i, n, time.Since(beginT))
+		f.Log.Printf("file %v i %v buf_ReadFrom: nBytes: %v, dur: %v", f.FileName, i, n, time.Since(beginT))
 		if i == 0 || n > 0 {
 			// the first time open the file always send data to OutputChan,
 			// even if the file is empty; from the second time only send data to
@@ -114,7 +120,7 @@ func (f *Follower) Follow() {
 				continue
 			}
 			beginT := time.Now()
-			f.Log.Printf("i %v fd_Seek %v, dur: %v", i, f.FilePath, time.Since(beginT))
+			f.Log.Printf("i %v fd_Seek %v, dur: %v", i, f.FileName, time.Since(beginT))
 			_, err := f.fd.Seek(0, io.SeekStart)
 			if err == nil {
 				continue
@@ -134,7 +140,7 @@ func (f *Follower) Follow() {
 				break
 			}
 			modifiedType, errCFM = f.checkFileModified()
-			f.Log.Printf("i %v k %v modifiedType: %v, errCFM: %v", i, k, modifiedType, errCFM)
+			f.Log.Printf("file %v i %v k %v checkFileModified: %v, err: %v", f.FileName, i, k, modifiedType, errCFM)
 			if errCFM != nil || modifiedType != Unchanged {
 				break
 			}
@@ -155,9 +161,9 @@ func (f *Follower) Follow() {
 			}
 			beginT := time.Now()
 			_, err := f.fd.Seek(0, io.SeekStart)
-			f.Log.Printf("fd_Seek %v, dur: %v", f.FilePath, time.Since(beginT))
+			f.Log.Printf("fd_Seek %v, dur: %v", f.FileName, time.Since(beginT))
 			if err != nil {
-				f.Log.Printf("error fd_Seek %v: %v", f.FilePath, err)
+				f.Log.Printf("error fd_Seek %v: %v", f.FileName, err)
 				f.fd.Close()
 				f.fd = nil
 				continue
@@ -186,7 +192,7 @@ const (
 func (f *Follower) checkFileModified() (ModifiedType, error) {
 	beginT := time.Now()
 	defer func() {
-		f.Log.Printf("checkFileModified dur: %v", time.Since(beginT))
+		f.Log.Printf("checkFileModified %v dur: %v", f.FileName, time.Since(beginT))
 	}()
 	fi, err := os.Stat(f.FilePath)
 	if err != nil {

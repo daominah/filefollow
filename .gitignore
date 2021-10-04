@@ -17,3 +17,7 @@ cmd/*/*.exe
 
 # config with real username, password...
 conf/ignore*.sh
+
+
+# this package only require standard modules
+go.mod
