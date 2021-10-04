@@ -168,7 +168,7 @@ func (f *Follower) Follow() {
 				f.fd = nil
 				continue
 			} else {
-				continue // next loop read current from begin
+				continue // next loop will read from the beginning
 			}
 		case Created:
 			f.fd.Close()
